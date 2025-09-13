@@ -21,7 +21,7 @@ No installation is needed. You can run this application directly from your Power
 
 Open PowerShell and run the following command:
 ```powershell
-irm -useb dub.sh/SerialMonPlot | iex
+irm bit.ly/SerialMonPlots | iex
 ```
 This will download the script and execute it in memory. The GUI window will appear after a few moments.
 

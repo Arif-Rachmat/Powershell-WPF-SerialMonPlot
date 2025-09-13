@@ -57,7 +57,6 @@ Show-WelcomeMessage -Version $Version
 # --- ASSEMBLY LOADING ---
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName System.Windows.Forms #for MessageBox
-Add-Type -AssemblyName System.IO.Ports
 
 # --- XAML UI DEFINITION ---
 [xml]$xaml = @"
