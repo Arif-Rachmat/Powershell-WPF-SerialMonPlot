@@ -136,6 +136,11 @@ Add-Type -AssemblyName System.Windows.Forms #for MessageBox
                 </Setter.Value>
             </Setter>
         </Style>
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="#F1F1F1"/>
+            <Setter Property="Margin" Value="0,0,10,0"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
     </Window.Resources>
     
     <Grid Margin="10">
@@ -184,6 +189,8 @@ Add-Type -AssemblyName System.Windows.Forms #for MessageBox
                     
                     <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,10,0,0">
                         <Button x:Name="ClearButton" Content="Clear Output" Width="100"/>
+                        <CheckBox x:Name="EnableTimestampCheckBox" Content="Enable Timestamps" Margin="20,0,0,0"/>
+                        <CheckBox x:Name="UseRelativeTimeCheckBox" Content="Use Relative Time" Margin="20,0,0,0"/>
                     </StackPanel>
                 </Grid>
             </TabItem>
@@ -210,6 +217,8 @@ $global:plotPoints = New-Object System.Collections.Generic.List[double]
 $maxPlotPoints = 500 # Adjust this to show more or less history on the graph
 $global:uiTimer = New-Object System.Windows.Threading.DispatcherTimer
 $global:eventSubscriber = $null
+$global:enableTimestamps = $false
+$global:useRelativeTime = $false
 
 # --- FIND UI ELEMENTS ---
 $controls = @{
@@ -224,6 +233,8 @@ $controls = @{
     RefreshButton      = $window.FindName("RefreshButton")
     LineEndingComboBox = $window.FindName("LineEndingComboBox")
     GraphCanvas        = $window.FindName("GraphCanvas")
+    EnableTimestampCheckBox = $window.FindName("EnableTimestampCheckBox")
+    UseRelativeTimeCheckBox = $window.FindName("UseRelativeTimeCheckBox")
 }
 
 # --- INITIAL CONTROL SETUP ---
@@ -351,6 +362,14 @@ $global:uiTimer.Add_Tick({
     }
 })
 
+# Initialize timestamp checkboxes
+$controls.EnableTimestampCheckBox.IsChecked = $global:enableTimestamps
+$controls.EnableTimestampCheckBox.Add_Checked({ $global:enableTimestamps = $true })
+$controls.EnableTimestampCheckBox.Add_Unchecked({ $global:enableTimestamps = $false })
+$controls.UseRelativeTimeCheckBox.IsChecked = $global:useRelativeTime
+$controls.UseRelativeTimeCheckBox.Add_Checked({ $global:useRelativeTime = $true })
+$controls.UseRelativeTimeCheckBox.Add_Unchecked({ $global:useRelativeTime = $false })
+
 # Toggle connection state
 $controls.ConnectButton.Add_Click({
     if ($global:serialPort -and $global:serialPort.IsOpen) {
@@ -358,6 +377,10 @@ $controls.ConnectButton.Add_Click({
         $global:uiTimer.Stop()
         if ($global:eventSubscriber) { Unregister-Event -SubscriptionId $global:eventSubscriber.Id -ErrorAction SilentlyContinue; $global:eventSubscriber = $null }
         $global:serialPort.Close(); $global:serialPort.Dispose(); $global:serialPort = $null
+
+        # Cleanup data queues
+        while ($global:textDataQueue.TryDequeue([ref]$null)) {}
+        while ($global:plotDataQueue.TryDequeue([ref]$null)) {}
         
         $controls.ConnectButton.Content = "Connect"
         $controls.ComPortComboBox.IsEnabled = $true
@@ -378,19 +401,39 @@ $controls.ConnectButton.Add_Click({
         try {
             $global:serialPort.Open()
             $global:plotPoints.Clear() # Clear old plot data on new connection
-            
+
+            $global:startTime = Get-Date
             $global:eventSubscriber = Register-ObjectEvent -InputObject $global:serialPort -EventName DataReceived -Action {
                 try {
                     $port = $event.Sender
                     if ($port.IsOpen) {
                         $receivedText = $port.ReadExisting()
                         if (-not [string]::IsNullOrEmpty($receivedText)) {
-                            $global:textDataQueue.Enqueue($receivedText)
+                            # Process timestamps if enabled
+                            $lines = $receivedText -split "(`r?`n)"
+                            $processedText = New-Object System.Text.StringBuilder
+
+                            foreach ($line in $lines) {
+                                if ($line.Trim().Length -gt 0) {
+                                    $timestamp = ""
+                                    if ($global:enableTimestamps) {
+                                        $now = Get-Date
+                                        if ($global:useRelativeTime) {
+                                            $elapsed = $now - $global:startTime
+                                            $timestamp = "[{0:hh\:mm\:ss\.fff}] " -f $elapsed
+                                        } else {
+                                            $timestamp = "[{0:HH:mm:ss.fff}] " -f $now
+                                        }
+                                    }
+                                    [void]$processedText.AppendLine("$timestamp$line")
+                                }
+                            }
+
+                            $global:textDataQueue.Enqueue($processedText.ToString())
 
                             # Try to parse numerical data for the plotter
-                            $lines = $receivedText -split "(`r?`n)" | Where-Object {$_ -notmatch '^\s*$'}
-                            $number = 0.0
                             foreach ($line in $lines) {
+                                $number = 0.0
                                 if ([double]::TryParse($line.Trim(), [ref]$number)) {
                                     $global:plotDataQueue.Enqueue($number)
                                 }
