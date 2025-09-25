@@ -8,10 +8,15 @@
 .NOTES
     Requires .NET Framework (included with modern Windows versions).
     The plotter expects numerical data, typically one value per line, from the serial port.
+    
+    Version 1.1.0: 
+                    * Added Live-Typing Mode for sending data instantly after each keypress.
+                    * Fixed line ending character
+                    * Fixed Version number
 #>
 
 # --- VERSION INFO ---
-$Version = "1.0.0"
+$Version = "1.1.0"
 
 # --- Welcome Message ---
 function Show-WelcomeMessage {
@@ -150,14 +155,29 @@ Add-Type -AssemblyName System.Windows.Forms #for MessageBox
         </Grid.RowDefinitions>
         
         <Border Grid.Row="0" Background="#333337" CornerRadius="3" Padding="10">
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                <TextBlock Text="COM Port:" Foreground="#F1F1F1" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                <ComboBox x:Name="ComPortComboBox" Width="100" VerticalContentAlignment="Center"/>
-                <Button x:Name="RefreshButton" Content="&#x27F3;" Width="30" Margin="5,0,0,0" ToolTip="Refresh COM Ports" FontWeight="Bold"/>
-                <TextBlock Text="Baud Rate:" Foreground="#F1F1F1" VerticalAlignment="Center" Margin="15,0,5,0"/>
-                <ComboBox x:Name="BaudRateComboBox" Width="100" VerticalContentAlignment="Center"/>
-                <Button x:Name="ConnectButton" Content="Connect" Width="90" Margin="20,0,0,0" Style="{StaticResource ConnectButton}"/>
-            </StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="COM Port:" Foreground="#F1F1F1" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                    <ComboBox x:Name="ComPortComboBox" Width="100" VerticalContentAlignment="Center"/>
+                    <Button x:Name="RefreshButton" Content="&#x27F3;" Width="30" Margin="5,0,0,0" ToolTip="Refresh COM Ports" FontWeight="Bold"/>
+                    <TextBlock Text="Baud Rate:" Foreground="#F1F1F1" VerticalAlignment="Center" Margin="15,0,5,0"/>
+                    <ComboBox x:Name="BaudRateComboBox" Width="100" VerticalContentAlignment="Center"/>
+                    <Button x:Name="ConnectButton" Content="Connect" Width="90" Margin="20,0,0,0" Style="{StaticResource ConnectButton}"/>
+                </StackPanel>
+
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Ellipse x:Name="LiveTypingIndicator" Width="12" Height="12" Fill="LimeGreen" Margin="0,0,5,0"
+                             ToolTip="Live Typing is ON" Visibility="Collapsed"/>
+                    <TextBlock x:Name="LiveTypingIndicatorLabel" Text="Live Typing ON" Foreground="LimeGreen" 
+                               FontWeight="Bold" VerticalAlignment="Center" Visibility="Collapsed"/>
+                </StackPanel>
+            </Grid>
         </Border>
         
         <TabControl Grid.Row="1" Margin="0,10,0,0">
@@ -191,6 +211,7 @@ Add-Type -AssemblyName System.Windows.Forms #for MessageBox
                         <Button x:Name="ClearButton" Content="Clear Output" Width="100"/>
                         <CheckBox x:Name="EnableTimestampCheckBox" Content="Enable Timestamps" Margin="20,0,0,0"/>
                         <CheckBox x:Name="UseRelativeTimeCheckBox" Content="Use Relative Time" Margin="20,0,0,0"/>
+                        <CheckBox x:Name="LiveTypingCheckBox" Content="Live Typing" Margin="20,0,0,0" IsEnabled="False"/>
                     </StackPanel>
                 </Grid>
             </TabItem>
@@ -219,6 +240,8 @@ $global:uiTimer = New-Object System.Windows.Threading.DispatcherTimer
 $global:eventSubscriber = $null
 $global:enableTimestamps = $false
 $global:useRelativeTime = $false
+$global:liveTypingEnabled = $false
+$global:liveTypeClearTimer = $null
 
 # --- FIND UI ELEMENTS ---
 $controls = @{
@@ -235,16 +258,24 @@ $controls = @{
     GraphCanvas        = $window.FindName("GraphCanvas")
     EnableTimestampCheckBox = $window.FindName("EnableTimestampCheckBox")
     UseRelativeTimeCheckBox = $window.FindName("UseRelativeTimeCheckBox")
+    LiveTypingCheckBox      = $window.FindName("LiveTypingCheckBox")
+    LiveTypingIndicator     = $window.FindName("LiveTypingIndicator")
+    LiveTypingIndicatorLabel = $window.FindName("LiveTypingIndicatorLabel")
 }
 
 # --- INITIAL CONTROL SETUP ---
 $populateComPorts = {
     $selectedPort = $controls.ComPortComboBox.SelectedItem
-    $availablePorts = [System.IO.Ports.SerialPort]::GetPortNames()
-    $controls.ComPortComboBox.ItemsSource = $availablePorts
-    if ($availablePorts.Count -gt 0) {
-        if ($selectedPort -and $availablePorts -contains $selectedPort) { $controls.ComPortComboBox.SelectedItem = $selectedPort }
-        else { $controls.ComPortComboBox.SelectedIndex = 0 }
+    try {
+        $availablePorts = [System.IO.Ports.SerialPort]::GetPortNames()
+        $controls.ComPortComboBox.ItemsSource = $availablePorts
+        if ($availablePorts.Count -gt 0) {
+            if ($selectedPort -and $availablePorts -contains $selectedPort) { $controls.ComPortComboBox.SelectedItem = $selectedPort }
+            else { $controls.ComPortComboBox.SelectedIndex = 0 }
+        }
+    } catch {
+        # Handle cases where GetPortNames might fail (e.g., driver issues)
+        $controls.ComPortComboBox.ItemsSource = @()
     }
 }
 $populateComPorts.Invoke()
@@ -294,11 +325,9 @@ $global:uiTimer.Add_Tick({
         $canvasHeight = $controls.GraphCanvas.ActualHeight
         $padding = 40 # Reserve space for labels
         
-        # Define the actual drawing area inside the padding
         $plotAreaWidth = $canvasWidth - (2 * $padding)
         $plotAreaHeight = $canvasHeight - (2 * $padding)
 
-        # Auto-scaling: Find min and max of the current data set
         $min = $global:plotPoints[0]; $max = $global:plotPoints[0]
         foreach($point in $global:plotPoints) {
             if($point -lt $min) {$min = $point}
@@ -307,56 +336,40 @@ $global:uiTimer.Add_Tick({
         $range = $max - $min
         if ($range -eq 0) { $range = 1 }
 
-        # --- Draw Axes and Gridlines ---
-        $yTickCount = 5 # Number of horizontal gridlines
-        $xTickCount = 5 # Number of vertical gridlines
+        $yTickCount = 5
+        $xTickCount = 5
         $gridlineBrush = ([System.Windows.Media.BrushConverter]::new()).ConvertFromString("#404040")
         $labelBrush = [System.Windows.Media.Brushes]::LightGray
 
-        # Draw Y-Axis Ticks, Labels, and Gridlines
         for($i = 0; $i -lt $yTickCount; $i++) {
             $value = $min + ($i * ($range / ($yTickCount - 1)))
             $y = ($canvasHeight - $padding) - ($i * ($plotAreaHeight / ($yTickCount - 1)))
-
-            # Gridline
             $gridLineY = New-Object System.Windows.Shapes.Line -Property @{ X1=$padding; Y1=$y; X2=$canvasWidth - $padding; Y2=$y; Stroke=$gridlineBrush; StrokeThickness=1 }
             $controls.GraphCanvas.Children.Add($gridLineY)
-
-            # Label
             $labelY = New-Object System.Windows.Controls.TextBlock -Property @{ Text=$value.ToString("F2"); Foreground=$labelBrush }
-            [System.Windows.Controls.Canvas]::SetLeft($labelY, 5)
-            [System.Windows.Controls.Canvas]::SetTop($labelY, $y - 10)
+            [System.Windows.Controls.Canvas]::SetLeft($labelY, 5); [System.Windows.Controls.Canvas]::SetTop($labelY, $y - 10)
             $controls.GraphCanvas.Children.Add($labelY)
         }
         
-        # Draw X-Axis Ticks, Labels, and Gridlines
         for($i = 0; $i -lt $xTickCount; $i++) {
             $pointIndex = [math]::Round($i * (($global:plotPoints.Count - 1) / ($xTickCount - 1)))
             $x = $padding + ($i * ($plotAreaWidth / ($xTickCount - 1)))
-            
-            # Gridline
             $gridLineX = New-Object System.Windows.Shapes.Line -Property @{ X1=$x; Y1=$padding; X2=$x; Y2=$canvasHeight - $padding; Stroke=$gridlineBrush; StrokeThickness=1 }
             $controls.GraphCanvas.Children.Add($gridLineX)
-
-            # Label
             $labelX = New-Object System.Windows.Controls.TextBlock -Property @{ Text=$pointIndex; Foreground=$labelBrush; TextAlignment="Center"; Width=50 }
-            [System.Windows.Controls.Canvas]::SetLeft($labelX, $x - 25)
-            [System.Windows.Controls.Canvas]::SetTop($labelX, $canvasHeight - $padding + 5)
+            [System.Windows.Controls.Canvas]::SetLeft($labelX, $x - 25); [System.Windows.Controls.Canvas]::SetTop($labelX, $canvasHeight - $padding + 5)
             $controls.GraphCanvas.Children.Add($labelX)
         }
 
-        # --- Draw Main Data Line ---
         $polyline = New-Object System.Windows.Shapes.Polyline
         $polyline.Stroke = [System.Windows.Media.Brushes]::LimeGreen
         $polyline.StrokeThickness = 2
         $points = New-Object System.Windows.Media.PointCollection
-
         for ($i = 0; $i -lt $global:plotPoints.Count; $i++) {
             $x = $padding + ($i / ($global:plotPoints.Count - 1)) * $plotAreaWidth
             $y = ($canvasHeight - $padding) - (($global:plotPoints[$i] - $min) / $range * $plotAreaHeight)
             $points.Add([System.Windows.Point]::new($x, $y))
         }
-        
         $polyline.Points = $points
         $controls.GraphCanvas.Children.Add($polyline)
     }
@@ -370,15 +383,32 @@ $controls.UseRelativeTimeCheckBox.IsChecked = $global:useRelativeTime
 $controls.UseRelativeTimeCheckBox.Add_Checked({ $global:useRelativeTime = $true })
 $controls.UseRelativeTimeCheckBox.Add_Unchecked({ $global:useRelativeTime = $false })
 
+# Live Typing Mode Checkbox Handler
+$controls.LiveTypingCheckBox.Add_Click({
+    $global:liveTypingEnabled = $controls.LiveTypingCheckBox.IsChecked
+    if ($global:liveTypingEnabled) {
+        $controls.LiveTypingIndicator.Visibility = 'Visible'
+        $controls.LiveTypingIndicatorLabel.Visibility = 'Visible'
+        $controls.SendButton.IsEnabled = $false
+        $controls.LineEndingComboBox.IsEnabled = $false
+        $controls.SendTextBox.Text = "" # Clear text on mode switch
+    } else {
+        $controls.LiveTypingIndicator.Visibility = 'Collapsed'
+        $controls.LiveTypingIndicatorLabel.Visibility = 'Collapsed'
+        $controls.SendButton.IsEnabled = $true
+        $controls.LineEndingComboBox.IsEnabled = $true
+    }
+})
+
 # Toggle connection state
 $controls.ConnectButton.Add_Click({
     if ($global:serialPort -and $global:serialPort.IsOpen) {
         # --- DISCONNECT ---
         $global:uiTimer.Stop()
+        if ($global:liveTypeClearTimer) { $global:liveTypeClearTimer.Stop(); $global:liveTypeClearTimer = $null }
         if ($global:eventSubscriber) { Unregister-Event -SubscriptionId $global:eventSubscriber.Id -ErrorAction SilentlyContinue; $global:eventSubscriber = $null }
         $global:serialPort.Close(); $global:serialPort.Dispose(); $global:serialPort = $null
 
-        # Cleanup data queues
         while ($global:textDataQueue.TryDequeue([ref]$null)) {}
         while ($global:plotDataQueue.TryDequeue([ref]$null)) {}
         
@@ -388,6 +418,10 @@ $controls.ConnectButton.Add_Click({
         $controls.BaudRateComboBox.IsEnabled = $true
         $controls.SendTextBox.IsEnabled = $false
         $controls.SendButton.IsEnabled = $false
+        $controls.LiveTypingCheckBox.IsChecked = $false
+        $controls.LiveTypingCheckBox.IsEnabled = $false
+        $controls.LiveTypingIndicator.Visibility = 'Collapsed' # Ensure indicator is off
+        $controls.LiveTypingIndicatorLabel.Visibility = 'Collapsed'
         $controls.OutputTextBox.AppendText("`n[INFO] Disconnected.`n")
     }
     else {
@@ -400,7 +434,18 @@ $controls.ConnectButton.Add_Click({
         
         try {
             $global:serialPort.Open()
-            $global:plotPoints.Clear() # Clear old plot data on new connection
+            $global:plotPoints.Clear()
+
+            # Initialize the timer for live typing auto-clear
+            $global:liveTypeClearTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $global:liveTypeClearTimer.Interval = [TimeSpan]::FromMilliseconds(300) # Delay before clearing
+            $global:liveTypeClearTimer.Add_Tick({
+
+                if ($global:liveTypingEnabled) {
+                    $controls.SendTextBox.Clear()
+                }
+                $global:liveTypeClearTimer.Stop() # Stop the timer so it only runs once per trigger
+            })
 
             $global:startTime = Get-Date
             $global:eventSubscriber = Register-ObjectEvent -InputObject $global:serialPort -EventName DataReceived -Action {
@@ -409,7 +454,6 @@ $controls.ConnectButton.Add_Click({
                     if ($port.IsOpen) {
                         $receivedText = $port.ReadExisting()
                         if (-not [string]::IsNullOrEmpty($receivedText)) {
-                            # Process timestamps if enabled
                             $lines = $receivedText -split "(`r?`n)"
                             $processedText = New-Object System.Text.StringBuilder
 
@@ -431,7 +475,6 @@ $controls.ConnectButton.Add_Click({
 
                             $global:textDataQueue.Enqueue($processedText.ToString())
 
-                            # Try to parse numerical data for the plotter
                             foreach ($line in $lines) {
                                 $number = 0.0
                                 if ([double]::TryParse($line.Trim(), [ref]$number)) {
@@ -451,6 +494,7 @@ $controls.ConnectButton.Add_Click({
             $controls.BaudRateComboBox.IsEnabled = $false
             $controls.SendTextBox.IsEnabled = $true
             $controls.SendButton.IsEnabled = $true
+            $controls.LiveTypingCheckBox.IsEnabled = $true
             $controls.OutputTextBox.AppendText("[INFO] Connected to $portName at $baudRate baud.`n")
         }
         catch {
@@ -462,12 +506,12 @@ $controls.ConnectButton.Add_Click({
 
 # Action to send data
 $sendAction = {
-    if ($global:serialPort -and $global:serialPort.IsOpen -and $controls.SendTextBox.Text.Length -gt 0) {
+    if (-not $global:liveTypingEnabled -and $global:serialPort -and $global:serialPort.IsOpen -and $controls.SendTextBox.Text.Length -gt 0) {
         $textToSend = $controls.SendTextBox.Text
         switch ($controls.LineEndingComboBox.SelectedItem) {
-            "Newline (\n)"        { $textToSend += "\n" }
-            "Carriage return (\r)"{ $textToSend += "\r" }
-            "Both NL & CR (\r\n)" { $textToSend += "\r\n" }
+            "Newline (\n)"        { $textToSend += "`n" }
+            "Carriage return (\r)"{ $textToSend += "`r" }
+            "Both NL & CR (\r\n)" { $textToSend += "`r`n" }
         }
         $global:serialPort.Write($textToSend)
         $controls.SendTextBox.Clear()
@@ -475,10 +519,33 @@ $sendAction = {
 }
 $controls.SendButton.Add_Click($sendAction)
 
-# Allow sending by pressing Enter
+# Send on Enter key, only if not in live typing mode
 $controls.SendTextBox.Add_KeyDown({ param($senderID, $e)
-    if ($e.Key -eq 'Enter') { $sendAction.Invoke() }
+    if ($e.Key -eq 'Enter' -and -not $global:liveTypingEnabled) { $sendAction.Invoke() }
 })
+
+# Handle character-by-character sending for Live Typing
+$controls.SendTextBox.Add_TextChanged({
+    param($senderID, $e)
+    if ($global:liveTypingEnabled -and $global:serialPort -and $global:serialPort.IsOpen) {
+        # This event gives us the changes. We iterate through them.
+        foreach ($change in $e.Changes) {
+            # We only care about characters being added.
+            if ($change.AddedLength -gt 0) {
+                # Get the actual text that was added from the textbox content.
+                $addedText = $senderID.Text.Substring($change.Offset, $change.AddedLength)
+                $global:serialPort.Write($addedText)
+                
+                # Restart the timer to clear the textbox after a delay
+                if ($global:liveTypeClearTimer) {
+                    $global:liveTypeClearTimer.Stop()
+                    $global:liveTypeClearTimer.Start()
+                }
+            }
+        }
+    }
+})
+
 
 # Clear the output window
 $controls.ClearButton.Add_Click({
@@ -489,6 +556,7 @@ $controls.ClearButton.Add_Click({
 $window.Add_Closing({
     if ($global:serialPort -and $global:serialPort.IsOpen) {
         $global:uiTimer.Stop()
+        if ($global:liveTypeClearTimer) { $global:liveTypeClearTimer.Stop() }
         if ($global:eventSubscriber) { Unregister-Event -SubscriptionId $global:eventSubscriber.Id -ErrorAction SilentlyContinue }
         $global:serialPort.Close()
         $global:serialPort.Dispose()
