@@ -14,12 +14,21 @@
                     * Fixed line ending character
                     * Fixed Version number
 
+    Version 1.1.1:
+                    * Use Append instead of AppendLine to add text to the text box when not using timestamp, to avoid line breaks.
+
+    Version 1.2.0:
+                    * Change the behaviour of Live-Typing Mode, where:
+                        - Input Textbox section is hidden in Live-Typing Mode, and uses the output textbox as it's input.
+                        - Added some special key and character support.
+
                     TODO Use timestamp for X-axis in plotter instead of point index.
                     TODO Add option to save log to file.
+                    TODO Add some more special key/character support to the list.
 #>
 
 # --- VERSION INFO ---
-$Version = "1.1.1"
+$Version = "1.2.0"
 
 # --- Welcome Message ---
 function Show-WelcomeMessage {
@@ -196,10 +205,11 @@ Add-Type -AssemblyName System.Windows.Forms #for MessageBox
                         <TextBox x:Name="OutputTextBox" IsReadOnly="True" TextWrapping="Wrap"
                                  FontFamily="Consolas" FontSize="12"
                                  Background="#1E1E1E" Foreground="#DCDCDC"
-                                 BorderThickness="0" VerticalScrollBarVisibility="Auto"/>
+                                 BorderThickness="0" VerticalScrollBarVisibility="Auto"
+                                 CaretBrush = "Transparent"/>
                     </ScrollViewer>
                     
-                    <Grid Grid.Row="1" Margin="0,10,0,0">
+                    <Grid x:Name="SendingGrid" Grid.Row="1" Margin="0,10,0,0">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
@@ -244,21 +254,21 @@ $global:eventSubscriber = $null
 $global:enableTimestamps = $false
 $global:useRelativeTime = $false
 $global:liveTypingEnabled = $false
-$global:liveTypeClearTimer = $null
 
 # --- FIND UI ELEMENTS ---
 $controls = @{
-    ComPortComboBox    = $window.FindName("ComPortComboBox")
-    BaudRateComboBox   = $window.FindName("BaudRateComboBox")
-    ConnectButton      = $window.FindName("ConnectButton")
-    OutputTextBox      = $window.FindName("OutputTextBox")
-    SendTextBox        = $window.FindName("SendTextBox")
-    SendButton         = $window.FindName("SendButton")
-    ClearButton        = $window.FindName("ClearButton")
-    OutputScrollViewer = $window.FindName("OutputScrollViewer")
-    RefreshButton      = $window.FindName("RefreshButton")
-    LineEndingComboBox = $window.FindName("LineEndingComboBox")
-    GraphCanvas        = $window.FindName("GraphCanvas")
+    ComPortComboBox     = $window.FindName("ComPortComboBox")
+    BaudRateComboBox    = $window.FindName("BaudRateComboBox")
+    ConnectButton       = $window.FindName("ConnectButton")
+    OutputTextBox       = $window.FindName("OutputTextBox")
+    SendingGrid         = $window.FindName("SendingGrid")
+    SendTextBox         = $window.FindName("SendTextBox")
+    SendButton          = $window.FindName("SendButton")
+    ClearButton         = $window.FindName("ClearButton")
+    OutputScrollViewer  = $window.FindName("OutputScrollViewer")
+    RefreshButton       = $window.FindName("RefreshButton")
+    LineEndingComboBox  = $window.FindName("LineEndingComboBox")
+    GraphCanvas         = $window.FindName("GraphCanvas")
     EnableTimestampCheckBox = $window.FindName("EnableTimestampCheckBox")
     UseRelativeTimeCheckBox = $window.FindName("UseRelativeTimeCheckBox")
     LiveTypingCheckBox      = $window.FindName("LiveTypingCheckBox")
@@ -392,14 +402,18 @@ $controls.LiveTypingCheckBox.Add_Click({
     if ($global:liveTypingEnabled) {
         $controls.LiveTypingIndicator.Visibility = 'Visible'
         $controls.LiveTypingIndicatorLabel.Visibility = 'Visible'
-        $controls.SendButton.IsEnabled = $false
-        $controls.LineEndingComboBox.IsEnabled = $false
         $controls.SendTextBox.Text = "" # Clear text on mode switch
+        $controls.SendingGrid.IsEnabled = $false
+        $controls.SendingGrid.Visibility = 'Collapsed'
+        $controls.OutputTextBox.IsReadOnly = $false
+        $controls.OutputTextBox.focus()
     } else {
         $controls.LiveTypingIndicator.Visibility = 'Collapsed'
         $controls.LiveTypingIndicatorLabel.Visibility = 'Collapsed'
-        $controls.SendButton.IsEnabled = $true
-        $controls.LineEndingComboBox.IsEnabled = $true
+        $controls.OutputTextBox.IsReadOnly = $true
+        $controls.SendingGrid.Visibility = 'Visible'
+        $controls.SendingGrid.IsEnabled = $true
+        $controls.SendTextBox.focus()
     }
 })
 
@@ -408,7 +422,6 @@ $controls.ConnectButton.Add_Click({
     if ($global:serialPort -and $global:serialPort.IsOpen) {
         # --- DISCONNECT ---
         $global:uiTimer.Stop()
-        if ($global:liveTypeClearTimer) { $global:liveTypeClearTimer.Stop(); $global:liveTypeClearTimer = $null }
         if ($global:eventSubscriber) { Unregister-Event -SubscriptionId $global:eventSubscriber.Id -ErrorAction SilentlyContinue; $global:eventSubscriber = $null }
         $global:serialPort.Close(); $global:serialPort.Dispose(); $global:serialPort = $null
 
@@ -438,17 +451,6 @@ $controls.ConnectButton.Add_Click({
         try {
             $global:serialPort.Open()
             $global:plotPoints.Clear()
-
-            # Initialize the timer for live typing auto-clear
-            $global:liveTypeClearTimer = New-Object System.Windows.Threading.DispatcherTimer
-            $global:liveTypeClearTimer.Interval = [TimeSpan]::FromMilliseconds(300) # Delay before clearing
-            $global:liveTypeClearTimer.Add_Tick({
-
-                if ($global:liveTypingEnabled) {
-                    $controls.SendTextBox.Clear()
-                }
-                $global:liveTypeClearTimer.Stop() # Stop the timer so it only runs once per trigger
-            })
 
             $global:startTime = Get-Date
             $global:eventSubscriber = Register-ObjectEvent -InputObject $global:serialPort -EventName DataReceived -Action {
@@ -530,28 +532,74 @@ $controls.SendTextBox.Add_KeyDown({ param($senderID, $e)
     if ($e.Key -eq 'Enter' -and -not $global:liveTypingEnabled) { $sendAction.Invoke() }
 })
 
-# Handle character-by-character sending for Live Typing
-$controls.SendTextBox.Add_TextChanged({
+# --- Live Typing Mode ---
+$controls.OutputTextBox.add_PreviewTextInput({
     param($senderID, $e)
-    if ($global:liveTypingEnabled -and $global:serialPort -and $global:serialPort.IsOpen) {
-        # This event gives us the changes. We iterate through them.
-        foreach ($change in $e.Changes) {
-            # We only care about characters being added.
-            if ($change.AddedLength -gt 0) {
-                # Get the actual text that was added from the textbox content.
-                $addedText = $senderID.Text.Substring($change.Offset, $change.AddedLength)
-                $global:serialPort.Write($addedText)
-                
-                # Restart the timer to clear the textbox after a delay
-                if ($global:liveTypeClearTimer) {
-                    $global:liveTypeClearTimer.Stop()
-                    $global:liveTypeClearTimer.Start()
-                }
-            }
+    if ($global:serialPort.IsOpen) {
+        try {
+            $global:serialPort.Write($e.Text)
+            $e.Handled = $true
+        }
+        catch {
+            Write-Warning "Error Writing to Port: $($_.Exception.Message)"
         }
     }
 })
 
+# Special keys Handler
+$controls.OutputTextBox.add_PreviewKeyDown({
+    param($senderID, $e)
+    if ($global:serialPort.IsOpen) {
+        try {
+            switch ($e.Key) {
+                'Space'     { 
+                    $global:serialPort.Write([char]32) 
+                    $e.Handled = $true
+                }
+                'Back'      { 
+                    $global:serialPort.Write([char]8) 
+                    $e.Handled = $true 
+                }
+                'Tab'       { 
+                    $global:serialPort.Write([char]9) 
+                    $e.Handled = $true 
+                }
+                'Delete'    { 
+                    $global:serialPort.Write([char]127) 
+                    $e.Handled = $true 
+                }
+                'Left'      { 
+                    $global:serialPort.Write([char]27) 
+                    $global:serialPort.Write([char]91) 
+                    $global:serialPort.Write([char]68) 
+                    $e.Handled = $true 
+                }
+                'Right'     { 
+                    $global:serialPort.Write([char]27) 
+                    $global:serialPort.Write([char]91) 
+                    $global:serialPort.Write([char]67) 
+                    $e.Handled = $true 
+                }
+                'Down'      { 
+                    $global:serialPort.Write([char]27) 
+                    $global:serialPort.Write([char]91) 
+                    $global:serialPort.Write([char]66) 
+                    $e.Handled = $true 
+                }
+                'Up'        { 
+                    $global:serialPort.Write([char]27) 
+                    $global:serialPort.Write([char]91) 
+                    $global:serialPort.Write([char]65) 
+                    $e.Handled = $true 
+                }
+                Default {}
+            }
+        }
+        catch {
+            Write-Warning "Error Writing to Port: $($_.Exception.Message)"
+        }
+    }
+})
 
 # Clear the output window
 $controls.ClearButton.Add_Click({
@@ -562,7 +610,6 @@ $controls.ClearButton.Add_Click({
 $window.Add_Closing({
     if ($global:serialPort -and $global:serialPort.IsOpen) {
         $global:uiTimer.Stop()
-        if ($global:liveTypeClearTimer) { $global:liveTypeClearTimer.Stop() }
         if ($global:eventSubscriber) { Unregister-Event -SubscriptionId $global:eventSubscriber.Id -ErrorAction SilentlyContinue }
         $global:serialPort.Close()
         $global:serialPort.Dispose()

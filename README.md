@@ -39,6 +39,6 @@ This will download the script and execute it in memory. The GUI window will appe
     - The plotter expects one number per line. For example, an Arduino sending `Serial.println(analogRead(A0));` will work perfectly
 5. **Send Data**:
     - **Standard Mode**: Type a message in the text box, select a line ending, and click "Send" or press <kbd>Enter</kbd>.
-    - **Live Typing Mode**: Check the "Live Typing" checkbox. Each character you type will be sent instantly and then cleared from the input box in a short time.
+    - **Live Typing Mode**: Check the "Live Typing" checkbox. Each character you type will be sent instantly.
 ## License
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
