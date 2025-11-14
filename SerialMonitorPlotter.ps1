@@ -22,13 +22,16 @@
                         - Input Textbox section is hidden in Live-Typing Mode, and uses the output textbox as it's input.
                         - Added some special key and character support.
 
+    Version 1.2.1:
+                    * Fix output Text Box read-only properties.
+
                     TODO Use timestamp for X-axis in plotter instead of point index.
                     TODO Add option to save log to file.
                     TODO Add some more special key/character support to the list.
 #>
 
 # --- VERSION INFO ---
-$Version = "1.2.0"
+$Version = "1.2.1"
 
 # --- Welcome Message ---
 function Show-WelcomeMessage {
@@ -405,12 +408,10 @@ $controls.LiveTypingCheckBox.Add_Click({
         $controls.SendTextBox.Text = "" # Clear text on mode switch
         $controls.SendingGrid.IsEnabled = $false
         $controls.SendingGrid.Visibility = 'Collapsed'
-        $controls.OutputTextBox.IsReadOnly = $false
         $controls.OutputTextBox.focus()
     } else {
         $controls.LiveTypingIndicator.Visibility = 'Collapsed'
         $controls.LiveTypingIndicatorLabel.Visibility = 'Collapsed'
-        $controls.OutputTextBox.IsReadOnly = $true
         $controls.SendingGrid.Visibility = 'Visible'
         $controls.SendingGrid.IsEnabled = $true
         $controls.SendTextBox.focus()
@@ -535,7 +536,7 @@ $controls.SendTextBox.Add_KeyDown({ param($senderID, $e)
 # --- Live Typing Mode ---
 $controls.OutputTextBox.add_PreviewTextInput({
     param($senderID, $e)
-    if ($global:serialPort.IsOpen) {
+    if ($global:serialPort.IsOpen -and $global:liveTypingEnabled) {
         try {
             $global:serialPort.Write($e.Text)
             $e.Handled = $true
@@ -549,7 +550,7 @@ $controls.OutputTextBox.add_PreviewTextInput({
 # Special keys Handler
 $controls.OutputTextBox.add_PreviewKeyDown({
     param($senderID, $e)
-    if ($global:serialPort.IsOpen) {
+    if ($global:serialPort.IsOpen -and $global:liveTypingEnabled) {
         try {
             switch ($e.Key) {
                 'Space'     { 
