@@ -13,10 +13,13 @@
                     * Added Live-Typing Mode for sending data instantly after each keypress.
                     * Fixed line ending character
                     * Fixed Version number
+
+                    TODO Use timestamp for X-axis in plotter instead of point index.
+                    TODO Add option to save log to file.
 #>
 
 # --- VERSION INFO ---
-$Version = "1.1.0"
+$Version = "1.1.1"
 
 # --- Welcome Message ---
 function Show-WelcomeMessage {
@@ -26,8 +29,8 @@ function Show-WelcomeMessage {
     $boxContent = @(
         "",
         "   ┏━━━━━┓              WPF Serial Monitor & Plotter",
-        "   ┃>☶☵☴ ┃╮╭╮╭╮         Version: $Version",
-        "   ┃>☴☳☱ ┃╰╯╰╯╰         Author: Arif Rachmat",
+        "   ┃>~~~ ┃╮╭╮╭╮         Version: $Version",
+        "   ┃>~~~ ┃╰╯╰╯╰         Author: Arif Rachmat",
         "   ┗━━━━━┻━━━━━         License: MIT",
         ""
     )
@@ -457,10 +460,10 @@ $controls.ConnectButton.Add_Click({
                             $lines = $receivedText -split "(`r?`n)"
                             $processedText = New-Object System.Text.StringBuilder
 
-                            foreach ($line in $lines) {
-                                if ($line.Trim().Length -gt 0) {
-                                    $timestamp = ""
-                                    if ($global:enableTimestamps) {
+                            if($global:enableTimestamps) {
+                                foreach ($line in $lines) {
+                                    if ($line.Trim().Length -gt 0) {
+                                        $timestamp = ""
                                         $now = Get-Date
                                         if ($global:useRelativeTime) {
                                             $elapsed = $now - $global:startTime
@@ -468,9 +471,12 @@ $controls.ConnectButton.Add_Click({
                                         } else {
                                             $timestamp = "[{0:HH:mm:ss.fff}] " -f $now
                                         }
+                                        $processedText.Append("`n$timestamp$line")
                                     }
-                                    [void]$processedText.AppendLine("$timestamp$line")
                                 }
+                            }
+                            else {
+                                $processedText.Append("$receivedText")
                             }
 
                             $global:textDataQueue.Enqueue($processedText.ToString())
